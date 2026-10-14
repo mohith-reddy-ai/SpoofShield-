@@ -1,0 +1,69 @@
+<!-- email-analyzer.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Analyzer</title>
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="logo">SpoofShield</div>
+            <ul class="nav-links">
+                <li><a href="index.html">Dashboard</a></li>
+                <li><a href="dns-scanner.html">DNS Scanner</a></li>
+                <li><a href="email-analyzer.html">Email Analyzer</a></li>
+                <li><a href="history.html">History</a></li>
+                <li><a href="reports.html">Reports</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section class="email-analysis">
+            <h2>Analyze Email</h2>
+            <form id="emailForm">
+                <label for="emailInput">Paste Raw Email Headers:</label>
+                <textarea id="emailInput" name="email" required></textarea>
+                <button type="submit" class="analyze-button">Analyze</button>
+            </form>
+        </section>
+
+        <section class="auth-results">
+            <h2>Authentication Results</h2>
+            <div id="authResults">
+                <!-- Authentication Results will appear here -->
+            </div>
+        </section>
+
+        <section class="risk-score">
+            <h2>Risk Score</h2>
+            <div id="riskScore">
+                <!-- Risk Score will appear here -->
+            </div>
+        </section>
+
+        <section class="explanations">
+            <h2>Explanations</h2>
+            <div id="explanationsOutput">
+                <!-- Explanations will appear here -->
+            </div>
+        </section>
+
+        <section class="error-messages">
+            <h2>Error Messages</h2>
+            <div id="errorOutput">
+                <!-- Error Messages will appear here -->
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 SpoofShield. All rights reserved.</p>
+    </footer>
+
+    <script src="assets/js/email-analyzer.js"></script>
+</body>
+</html>
