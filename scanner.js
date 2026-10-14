@@ -1,9 +1,5 @@
-// DNS Scanner Script
-// Required HTML IDs:
-// - domainInput: Input field for the domain
-// - scanButton: Button to trigger the DNS scan
-// - resultContainer: Container to display the DNS scan results
-// - errorContainer: Container to display error messages
+// scanner.js (updated)
+// expects: #domainInput, #scanButton, #resultContainer, #errorContainer
 
 document.addEventListener('DOMContentLoaded', function() {
     const domainInput = document.getElementById('domainInput');
@@ -11,12 +7,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const resultContainer = document.getElementById('resultContainer');
     const errorContainer = document.getElementById('errorContainer');
 
-    scanButton.addEventListener('click', async function() {
-        // Clear previous results and errors
-        resultContainer.innerHTML = '';
-        errorContainer.innerHTML = '';
+    if (!domainInput || !scanButton || !resultContainer) {
+        console.warn('scanner.js: expected DOM elements not found.');
+        return;
+    }
 
-        // Disable the scan button during the request
+    scanButton.addEventListener('click', async function() {
+        resultContainer.innerHTML = '';
+        errorContainer && (errorContainer.innerHTML = '');
         scanButton.disabled = true;
 
         const domain = domainInput.value.trim();
@@ -29,80 +27,106 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             const response = await fetch('/api/dns_scan.php', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ domain })
             });
-
             if (!response.ok) {
-                throw new Error('Network error. Please try again.');
+                const txt = await response.text();
+                throw new Error('Server error: ' + response.status + ' ' + txt);
             }
-
-            const data = await response.json();
-            renderResults(data);
-        } catch (error) {
-            showErrorMessage(error.message);
+            const json = await response.json();
+            if (!json.success) {
+                throw new Error(json.message || 'Scan failed');
+            }
+            renderResults(json.data);
+        } catch (err) {
+            showErrorMessage(err.message || 'Unknown error');
         } finally {
             scanButton.disabled = false;
         }
     });
 
     function validateDomain(domain) {
-        // Simple domain validation regex
         const domainRegex = /^(?!-)[A-Za-z0-9-]{1,63}(?<!-)\.[A-Za-z]{2,}$/;
         return domainRegex.test(domain);
     }
 
     function showErrorMessage(message) {
-        const errorElement = document.createElement('div');
-        errorElement.className = 'error';
-        errorElement.textContent = message;
-        errorContainer.appendChild(errorElement);
+        if (!errorContainer) return;
+        const e = document.createElement('div');
+        e.className = 'error';
+        e.textContent = message;
+        errorContainer.appendChild(e);
     }
 
     function renderResults(data) {
-        // Render findings
-        renderFinding('A', data.a);
-        renderFinding('AAAA', data.aaaa);
-        renderFinding('MX', data.mx);
-        renderFinding('NS', data.ns);
-        renderFinding('TXT', data.txt);
-        renderFinding('SPF', data.spf);
-        renderFinding('DMARC', data.dmarc);
+        // Highest-level
+        const title = document.createElement('div');
+        title.className = 'scan-summary';
+        title.innerHTML = `<strong>Domain:</strong> `;
+        const span = document.createElement('span');
+        span.textContent = data.domain + ' — ' + data.scanned_at;
+        title.appendChild(span);
+        resultContainer.appendChild(title);
 
-        // Render risk score and level
-        const riskScore = data.risk_score;
-        const riskLevel = data.risk_level;
+        // risk
+        const risk = document.createElement('div');
+        risk.className = 'risk';
+        risk.textContent = `Risk Score: ${data.risk_score} — ${data.risk_level}`;
+        resultContainer.appendChild(risk);
 
-        const riskElement = document.createElement('div');
-        riskElement.className = 'risk';
-        riskElement.innerHTML = `
-            <h3>Risk Score: ${encodeURIComponent(riskScore)}</h3>
-            <p>Risk Level: ${encodeURIComponent(riskLevel)}</p>
-        `;
-        resultContainer.appendChild(riskElement);
-    }
+        // records
+        const rec = data.records || {};
+        ['a','aaaa','mx','ns','txt','spf','dmarc'].forEach(function(k) {
+            if (!rec[k] || (Array.isArray(rec[k]) && rec[k].length === 0)) return;
+            const block = document.createElement('div');
+            block.className = 'finding';
+            const h = document.createElement('h3');
+            h.textContent = k.toUpperCase();
+            block.appendChild(h);
+            if (Array.isArray(rec[k])) {
+                const ul = document.createElement('ul');
+                rec[k].forEach(function(item) {
+                    const li = document.createElement('li');
+                    li.textContent = typeof item === 'string' ? item : JSON.stringify(item);
+                    ul.appendChild(li);
+                });
+                block.appendChild(ul);
+            } else {
+                const p = document.createElement('p');
+                p.textContent = rec[k];
+                block.appendChild(p);
+            }
+            resultContainer.appendChild(block);
+        });
 
-    function renderFinding(type, findings) {
-        if (!findings || findings.length === 0) {
-            return;
+        // findings + limitations
+        if (data.findings && data.findings.length) {
+            const fdiv = document.createElement('div');
+            fdiv.innerHTML = '<h3>Findings</h3>';
+            const ul = document.createElement('ul');
+            data.findings.forEach(function(it) { const li = document.createElement('li'); li.textContent = it; ul.appendChild(li); });
+            fdiv.appendChild(ul);
+            resultContainer.appendChild(fdiv);
+        }
+        if (data.limitations && data.limitations.length) {
+            const ldiv = document.createElement('div');
+            ldiv.innerHTML = '<h3>Limitations</h3>';
+            const ul = document.createElement('ul');
+            data.limitations.forEach(function(it) { const li = document.createElement('li'); li.textContent = it; ul.appendChild(li); });
+            ldiv.appendChild(ul);
+            resultContainer.appendChild(ldiv);
         }
 
-        const findingElement = document.createElement('div');
-        findingElement.className = 'finding';
-        findingElement.innerHTML = `
-            <h3>${encodeURIComponent(type)}</h3>
-            <ul>
-                ${findings.map(finding => `
-                    <li>
-                        <strong>Reason:</strong> ${encodeURIComponent(finding.reason)}<br>
-                        <strong>Timestamp:</strong> ${encodeURIComponent(finding.timestamp)}<br>
-                        <strong>Investigation Limitations:</strong> ${encodeURIComponent(finding.investigation_limitations)}
-                    </li>
-                `).join('')}
-            </ul>
-        `;
-        resultContainer.appendChild(findingElement);
+        // investigation id + link to report page (if present)
+        if (data.investigation_id) {
+            const iddiv = document.createElement('div');
+            iddiv.className = 'investigation';
+            const a = document.createElement('a');
+            a.href = `/report.html?id=${encodeURIComponent(data.investigation_id)}`;
+            a.textContent = 'View printable report';
+            iddiv.appendChild(a);
+            resultContainer.appendChild(iddiv);
+        }
     }
 });
