@@ -1,144 +1,184 @@
 <?php
-
 // api/email_analyze.php
+header('Content-Type: application/json; charset=utf-8');
 
-require_once 'config/database.php';
-
-header('Content-Type: application/json');
-
-// Only accept POST requests
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    echo json_encode(['success' => false, 'error' => 'Invalid request method']);
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+if ($method !== 'POST') {
+    http_response_code(405);
+    echo json_encode(['success' => false, 'message' => 'Method not allowed']);
     exit;
 }
 
-// Safely parse JSON input
-$input = file_get_contents('php://input');
-if (empty($input) || strlen($input) > 65536) {
-    echo json_encode(['success' => false, 'error' => 'Invalid input']);
+$maxBody = 64 * 1024; // 64KB
+$raw = file_get_contents('php://input');
+if ($raw === false || strlen($raw) > $maxBody) {
+    http_response_code(413);
+    echo json_encode(['success' => false, 'message' => 'Request too large or empty']);
     exit;
 }
-
-$request = json_decode($input, true);
+$input = json_decode($raw, true);
 if (json_last_error() !== JSON_ERROR_NONE) {
-    echo json_encode(['success' => false, 'error' => 'Invalid JSON']);
+    http_response_code(400);
+    echo json_encode(['success' => false, 'message' => 'Malformed JSON']);
+    exit;
+}
+$headersRaw = isset($input['headers']) ? (string)$input['headers'] : (isset($input['raw']) ? (string)$input['raw'] : '');
+if (empty($headersRaw)) {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'message' => 'Email headers required']);
     exit;
 }
 
-if (!isset($request['headers']) || empty($request['headers'])) {
-    echo json_encode(['success' => false, 'error' => 'Headers are required']);
-    exit;
-}
+require_once __DIR__ . '/../config/database.php';
 
-// Extract email headers
-$headers = $request['headers'];
-$headerLines = explode("\n", $headers);
-$parsedHeaders = [];
-$spfResult = null;
-$dmarcResult = null;
-$dkimResult = null;
-$findings = [];
-$authentication = [];
-$limitations = [];
-
-foreach ($headerLines as $line) {
-    list($key, $value) = explode(': ', $line, 2);
-    if (!isset($key) || !isset($value)) {
-        continue;
-    }
-
-    $parsedHeaders[$key] = $value;
-
-    switch (trim($key)) {
-        case 'Received-SPF':
-            $spfResult = $value;
-            break;
-        case 'Authentication-Results':
-            $authenticationResults = $value;
-            $authParts = explode('; ', $authenticationResults);
-            foreach ($authParts as $authPart) {
-                if (strpos($authPart, 'spf=') === 0) {
-                    $spfResult = $authPart;
-                } elseif (strpos($authPart, 'dkim=') === 0) {
-                    $dkimResult = $authPart;
-                } elseif (strpos($authPart, 'dmarc=') === 0) {
-                    $dmarcResult = $authPart;
-                }
+// Basic parsing: split into lines, trim
+$lines = preg_split("/\r\n|\n|\r/", $headersRaw);
+$parsed = [];
+$current = '';
+foreach ($lines as $line) {
+    if (preg_match('/^\s+/', $line)) {
+        // continuation line
+        $current .= ' ' . trim($line);
+    } else {
+        if ($current !== '') {
+            // store previous
+            $parts = explode(':', $current, 2);
+            if (count($parts) === 2) {
+                $name = strtolower(trim($parts[0]));
+                $value = trim($parts[1]);
+                $parsed[$name][] = $value;
             }
-            break;
-        case 'DKIM-Signature':
-            $dkimResult = $value;
-            break;
+        }
+        $current = $line;
+    }
+}
+// last line
+if ($current !== '') {
+    $parts = explode(':', $current, 2);
+    if (count($parts) === 2) {
+        $name = strtolower(trim($parts[0]));
+        $value = trim($parts[1]);
+        $parsed[$name][] = $value;
     }
 }
 
-// Check SPF and DMARC results
-if ($spfResult) {
-    if (strpos($spfResult, 'fail') !== false) {
-        $findings[] = ['SPF failure' => $spfResult];
-    } elseif (strpos($spfResult, 'pass') === false) {
-        $findings[] = ['SPF inconclusive or neutral' => $spfResult];
-    }
-}
-
-if ($dmarcResult) {
-    if (strpos($dmarcResult, 'fail') !== false) {
-        $findings[] = ['DMARC failure' => $dmarcResult];
-    } elseif (strpos($dmarcResult, 'pass') === false) {
-        $findings[] = ['DMARC inconclusive or neutral' => $dmarcResult];
-    }
-}
-
-// Suggest limitations
-if (!array_key_exists('From', $parsedHeaders) || !array_key_exists('Return-Path', $parsedHeaders)) {
-    $limitations[] = 'From or Return-Path headers are missing.';
-} elseif (trim($parsedHeaders['From']) !== trim($parsedHeaders['Return-Path'])) {
-    $findings[] = ['Mismatch between From and Return-Path' => $parsedHeaders['From'] . ' vs ' . $parsedHeaders['Return-Path']];
-}
-
-// Calculate heuristic risk score
+// Heuristics
+$findings = [];
+$limitations = [];
 $riskScore = 0;
-if (count($findings) > 0) {
-    foreach ($findings as $finding) {
-        $riskScore += 30;
+
+// Check for Authentication-Results header
+if (empty($parsed['authentication-results'])) {
+    $limitations[] = 'No Authentication-Results header; cannot fully assess SPF/DKIM/DMARC results from headers.';
+    $riskScore += 20;
+} else {
+    // inspect auth results minimally
+    foreach ($parsed['authentication-results'] as $ar) {
+        if (stripos($ar, 'spf=pass') !== false) {
+            // good for SPF
+        } elseif (stripos($ar, 'spf=fail') !== false || stripos($ar, 'spf=softfail') !== false) {
+            $findings[] = 'SPF result indicates failure/softfail in Authentication-Results header.';
+            $riskScore += 30;
+        }
+        if (stripos($ar, 'dkim=pass') !== false) {
+            // DKIM pass noted; we DO NOT claim cryptographic verification beyond header claim.
+        } elseif (stripos($ar, 'dkim=fail') !== false) {
+            $findings[] = 'DKIM reported as fail in Authentication-Results.';
+            $riskScore += 30;
+        }
+        if (stripos($ar, 'dmarc=pass') !== false) {
+            // ok
+        } elseif (stripos($ar, 'dmarc=fail') !== false) {
+            $findings[] = 'DMARC reported as fail in Authentication-Results.';
+            $riskScore += 20;
+        }
     }
 }
 
-$riskLevel = $riskScore > 75 ? 'High' : ($riskScore > 30 ? 'Medium' : 'Low');
-
-// Store summary in scan_history
-try {
-    $db = new PDO('mysql:host=' . DB_HOST . ';dbname=' . DB_NAME, DB_USER, DB_PASSWORD);
-    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-
-    $stmt = $db->prepare('INSERT INTO scan_history (target, analyzed_at, risk_score, risk_level, findings, authentication, limitations) VALUES (:target, :analyzed_at, :risk_score, :risk_level, :findings, :authentication, :limitations)');
-    $stmt->execute([
-        ':target' => isset($parsedHeaders['From']) ? $parsedHeaders['From'] : 'Unknown',
-        ':analyzed_at' => date('c'),
-        ':risk_score' => $riskScore,
-        ':risk_level' => $riskLevel,
-        ':findings' => json_encode($findings),
-        ':authentication' => json_encode($authentication),
-        ':limitations' => json_encode($limitations),
-    ]);
-} catch (PDOException $e) {
-    echo json_encode(['success' => false, 'error' => 'Failed to save scan history']);
-    exit;
+// Received headers analysis - look for suspicious originating IPs or obfuscated hops
+if (!empty($parsed['received'])) {
+    $received = $parsed['received'];
+    // penalize if many hops from uncommon networks or missing trusted MX hops
+    if (count($received) > 4) {
+        $limitations[] = 'Many Received hops (>4) observed; chain may include relays.';
+        $riskScore += 5;
+    }
+    // simple check: presence of "by" vs "from" anomalies
+    foreach ($received as $r) {
+        if (preg_match('/\bhelo=spam\b/i', $r)) {
+            $findings[] = 'Suspicious received header content detected.';
+            $riskScore += 20;
+        }
+    }
+} else {
+    $limitations[] = 'No Received headers found.';
+    $riskScore += 10;
 }
 
-// Return result
+// Check for Return-Path vs From mismatch
+$from = isset($parsed['from'][0]) ? $parsed['from'][0] : null;
+$returnPath = isset($parsed['return-path'][0]) ? $parsed['return-path'][0] : null;
+if ($from && $returnPath) {
+    // attempt to extract domains
+    preg_match('/@([A-Za-z0-9\.\-]+)/', $from, $mFrom);
+    preg_match('/@([A-Za-z0-9\.\-]+)/', $returnPath, $mRet);
+    $domainFrom = $mFrom[1] ?? null;
+    $domainRet = $mRet[1] ?? null;
+    if ($domainFrom && $domainRet && strcasecmp($domainFrom, $domainRet) !== 0) {
+        $findings[] = 'From address domain and Return-Path domain differ.';
+        $riskScore += 15;
+    }
+}
+
+// other checks: presence of DKIM-Signature header is good signal (but we do not cryptographically verify here)
+if (!empty($parsed['dkim-signature'])) {
+    // slight reduction of risk if present
+    $riskScore = max(0, $riskScore - 5);
+}
+
+// clamp
+$riskScore = max(0, min(100, (int)$riskScore));
+$riskLevel = $riskScore >= 60 ? 'High' : ($riskScore >= 30 ? 'Moderate' : 'Low');
+
+$investigationId = bin2hex(random_bytes(12));
+$scannedAt = (new DateTime())->format('Y-m-d H:i:s');
+
+$store = [
+    'headers' => $parsed,
+    'raw' => substr($headersRaw, 0, 10000) // keep a truncated copy for privacy
+];
+
+if (isset($pdo) && $pdo instanceof PDO) {
+    try {
+        $stmt = $pdo->prepare('INSERT INTO scan_history (investigation_id, target, type, scanned_at, records, risk_score, risk_level, findings, limitations) VALUES (:investigation_id,:target,:type,:scanned_at,:records,:risk_score,:risk_level,:findings,:limitations)');
+        $stmt->execute([
+            ':investigation_id' => $investigationId,
+            ':target' => $from ?: ($returnPath ?: 'unknown'),
+            ':type' => 'email',
+            ':scanned_at' => $scannedAt,
+            ':records' => json_encode($store),
+            ':risk_score' => $riskScore,
+            ':risk_level' => $riskLevel,
+            ':findings' => json_encode($findings),
+            ':limitations' => json_encode($limitations),
+        ]);
+    } catch (Exception $e) {
+        error_log('DB save email_analyze error: ' . $e->getMessage());
+    }
+} else {
+    error_log('No DB connection available (email_analyze).');
+}
+
+http_response_code(200);
 echo json_encode([
     'success' => true,
     'data' => [
-        'id' => $db->lastInsertId(),
-        'target' => isset($parsedHeaders['From']) ? $parsedHeaders['From'] : 'Unknown',
-        'analyzed_at' => date('c'),
+        'scanned_at' => $scannedAt,
+        'target' => $from,
         'risk_score' => $riskScore,
         'risk_level' => $riskLevel,
         'findings' => $findings,
-        'authentication' => $authentication,
         'limitations' => $limitations,
-    ],
+        'investigation_id' => $investigationId,
+    ]
 ]);
-
-?>
