@@ -1,31 +1,30 @@
 <?php
 // api/health.php
-
-// Include the database connection configuration
+header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-cache, no-store, must-revalidate');
 require_once __DIR__ . '/../config/database.php';
 
-// Prepare the response
 $response = [
     'success' => false,
-    'status' => 'Database connection failed',
+    'status' => 'unknown',
 ];
 
-// Check if the PDO connection is available
 try {
-    if ($pdo instanceof PDO) {
+    if (isset($pdo) && $pdo instanceof PDO) {
+        // quick lightweight query to validate DB
+        $stmt = $pdo->prepare('SELECT 1');
+        $stmt->execute();
         $response['success'] = true;
-        $response['status'] = 'Application is healthy';
+        $response['status'] = 'ok';
+        http_response_code(200);
+    } else {
+        $response['status'] = 'database_unavailable';
+        http_response_code(503);
     }
 } catch (Exception $e) {
-    // Handle any exceptions during the health check
-    $response['status'] = 'Exception occurred: ' . $e->getMessage();
+    error_log('health check error: ' . $e->getMessage());
+    $response['status'] = 'error';
+    http_response_code(500);
 }
 
-// Set no-cache headers
-header('Cache-Control: no-cache, no-store, must-revalidate');
-header('Pragma: no-cache');
-header('Expires: 0');
-header('Content-Type: application/json');
-
-// Return the JSON response
 echo json_encode($response);
