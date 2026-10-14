@@ -1,16 +1,15 @@
 <?php
 // config/database.php
+// Returns $pdo as a global variable. Does not echo DB errors in production.
 
-// Read database settings from environment variables or set defaults for local XAMPP development
 $host = getenv('DB_HOST') ?: '127.0.0.1';
 $dbname = getenv('DB_NAME') ?: 'spoofshield';
 $username = getenv('DB_USER') ?: 'root';
 $password = getenv('DB_PASS') ?: '';
+$charset = 'utf8mb4';
+$dsn = "mysql:host={$host};dbname={$dbname};charset={$charset}";
 
-// Data source name (DSN)
-$dsn = "mysql:host=$host;dbname=$dbname;charset=utf8mb4";
-
-// PDO options
+// Safe PDO options
 $options = [
     PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
@@ -18,14 +17,10 @@ $options = [
 ];
 
 try {
-    // Create a PDO instance
     $pdo = new PDO($dsn, $username, $password, $options);
 } catch (PDOException $e) {
-    // Handle database connection errors
-    http_response_code(500);
-    echo "Database connection failed: " . $e->getMessage();
-    exit();
+    // Log the error to server logs, do not echo sensitive details to clients
+    error_log('DB connection error: ' . $e->getMessage());
+    // If an API script includes this file, it may want to check $pdo
+    $pdo = null;
 }
-
-// Return the PDO connection
-return $pdo;
